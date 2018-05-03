@@ -1,5 +1,4 @@
-# KopanoAdmin
-Web GUI used to administer a Kopano system.
+Scripts to help administer Kopano Groupware 
 
 https://documentation.kopano.io/kopano_python_kopano/index.html
 
