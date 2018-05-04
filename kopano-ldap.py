@@ -25,15 +25,13 @@ kopanoLDAP       = {}
 kopanoFilter     = ""
 kopanoLDAPURL    = ""
 kopanoAttrAdd    = set(["objectclass","samaccountname"])
-kopanoAttrIgnore = set(["usnchanged","objectguid","grouptype","unicodepwd"])
+kopanoAttrIgnore = set(["usnchanged","objectguid","grouptype","unicodepwd","usercertificate","usercertificate;binary","zarafabase"])
 kopanoCacheFile  = "/tmp/kopano.ldap.cache"
 
-dominoLDAPURI = "ldap://domino.i.opw.ie/?objectclass,mail,member,mailaddress?sub?(|(objectClass=dominoPerson)(objectClass=dominoGroup))"
-dominoCacheFile  = "/tmp/domino.ldap.cache"
+exchangeAttrs    = set(["msExchGenericForwardingAddress","msExchHomeServerName"])
 
 emailCacheFile   = "/tmp/email.ldap.cache"
 
-postfixBCC = "/etc/postfix/bcc"
 postfixVTrans = "/etc/postfix/vtransport"
 
 class customUsageVersion(argparse.Action):
@@ -142,18 +140,23 @@ def get_kopano_LDAPURI():
     if key[-9:] == 'attribute':
       kopanoAttrs.add(kopanoLDAP[key].lower())
   kopanoAttrs -= kopanoAttrIgnore
+  kopanoAttrs |= exchangeAttrs
 
   for key in kopanoLDAP.keys():
     if key[-6:] == 'filter':
       kopanoFilter += kopanoLDAP[key]
   kopanoFilter = "(|" + kopanoFilter +")"
 
+
+  print "kopanoAttrs",kopanoAttrs
+
+
   kopanoLDAPURI = kopanoLDAP.get('ldap_uri','').split(" ")[0]
   if not kopanoLDAPURI:
     kopanoLDAPURI = kopanoLDAP.get('ldap_protocol','ldap') + '://' + kopanoLDAP.get('ldap_host','')
     if kopanoLDAP.has_key('ldap_port'): kopanoLDAPURI += ':' + kopanoLDAP['ldap_port']
   if kopanoLDAPURI[-1] != "/": kopanoLDAPURI += '/'
-  kopanoLDAPURI += urllib.quote(kopanoLDAP['ldap_search_base'])
+  if kopanoLDAP.has_key('ldap_search_base'): kopanoLDAPURI += urllib.quote(kopanoLDAP['ldap_search_base'])
   kopanoLDAPURI += "?" + urllib.quote(",".join(sorted(kopanoAttrs)))
   kopanoLDAPURI += "?sub"
   kopanoLDAPURI += "?" + kopanoFilter
@@ -169,14 +172,14 @@ def get_ldap(LDAPURI):
   # except:
   #   return {}
 
-def write_cache_file(filename, data):
-  json.dump(data, open(filename, 'w'), sort_keys=True, indent=2)
-
 def read_cache_file(filename):
   try:
     return json.load(open(filename,'r'))
   except:
     return {}
+
+def write_cache_file(filename, data):
+  json.dump(data, open(filename, 'w'), sort_keys=True, indent=2)
 
 def cmpDict(dict1, dict2):
   global args,output
@@ -218,7 +221,8 @@ def get_data():
 
   if not combinedEmails or not args['web']:
     date = datetime.datetime.now()
-    kopanoURI = get_kopano_LDAPURI()
+    URI = get_kopano_LDAPURI()
+
     kopanoLive = get_ldap(kopanoURI)
     if len(kopanoLive) < args['minObjects']:
       tmp = "Unable to get reliable Kopano Download. Only " + str(len(kopanoLive)) + " objects."
@@ -230,13 +234,6 @@ def get_data():
       output += "Kopano entries have changed\n"
       write_cache_file(kopanoCacheFile,kopanoLive)
       kopanoChanged = True
-
-    dominoLive = get_ldap(dominoLDAPURI)
-    if len(dominoLive) < args['minObjects']:
-      tmp = "Unable to get reliable Domino Download. Only " + str(len(dominoLive)) + " objects."
-      tmp += '\n' + str(dominoLDAPURI)
-      raise IOError, tmp
-    write_cache_file(dominoCacheFile,dominoLive)
 
     combinedEmails = {}
     for account in kopanoLive.keys():
@@ -254,24 +251,8 @@ def get_data():
         else:
           combinedEmails[mail]['type'] = ",".join(sorted(objectclass))
 
-    for account in dominoLive.keys():
-      for mail in dominoLive[account].get('mail',[]):
-        objectclass = set([ str(x).lower() for x in dominoLive[account].get('objectclass',[]) ])
-        if not combinedEmails.has_key(mail):
-          combinedEmails[mail] = {'kopano':False, 
-                                  'domino':True, 
-                                  'forward':False, 
-                                  'type':'', 
-                                  'username':''}
-        if bool(set(["group","dominogroup","groupofnames"]) & objectclass):
-          combinedEmails[mail]['type'] = "Group"
-        elif bool(set(["person","user","dominoperson","inetorgperson","organizationalperson"]) & objectclass):
-          combinedEmails[mail]['type'] = "User"
-        else:
-          combinedEmails[mail]['type'] = ",".join(sorted(objectclass))
-        combinedEmails[mail]['domino'] = True
-        combinedEmails[mail]['forward'] = dominoLive[account].has_key('mailaddress')
 
+    print "kopanoURI",kopanoURI
 
     write_cache_file(emailCacheFile,combinedEmails)
 
@@ -279,138 +260,139 @@ def get_data():
 
 # Start program
 if __name__ == "__main__":
-  try:
+  # try:
     output = ""
     error = ""
     exitcode = 0    
     xmldata = None
 
-    command_line_args()  
+    command_line_args()
     kopanoChanged, date, emails = get_data()
 
-    if args['web']:
-      xmldata = ElementTree.Element('emails', **{'date': brandt.strXML(datetime.datetime.strftime(date,'%Y-%m-%d %H:%M:%S'))})
-      for email in sorted(emails.keys()):
-        ElementTree.SubElement(xmldata, 'email', **{'mail': brandt.strXML(email), 
-                                        'kopano': brandt.strXML(emails[email]['kopano']), 
-                                        'domino': brandt.strXML(emails[email]['domino']), 
-                                        'forward': brandt.strXML(emails[email]['forward']),
-                                        'username': brandt.strXML(emails[email]['username']),
-                                        'type': brandt.strXML(emails[email]['type'])})
-    else:
-      if kopanoChanged or args['force']:
-        output += brandt.syslog("Changes detected: Running Kopano Sync\n", options=['pid'])
-        command = '/usr/sbin/kopano-admin --sync'
-        p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate()
-        if err: raise IOError(err)
-        output += out + "\n"
 
-      reloadPostfix = False
+  #   if args['web']:
+  #     xmldata = ElementTree.Element('emails', **{'date': brandt.strXML(datetime.datetime.strftime(date,'%Y-%m-%d %H:%M:%S'))})
+  #     for email in sorted(emails.keys()):
+  #       ElementTree.SubElement(xmldata, 'email', **{'mail': brandt.strXML(email), 
+  #                                       'kopano': brandt.strXML(emails[email]['kopano']), 
+  #                                       'domino': brandt.strXML(emails[email]['domino']), 
+  #                                       'forward': brandt.strXML(emails[email]['forward']),
+  #                                       'username': brandt.strXML(emails[email]['username']),
+  #                                       'type': brandt.strXML(emails[email]['type'])})
+  #   else:
+  #     if kopanoChanged or args['force']:
+  #       output += brandt.syslog("Changes detected: Running Kopano Sync\n", options=['pid'])
+  #       command = '/usr/sbin/kopano-admin --sync'
+  #       p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  #       out, err = p.communicate()
+  #       if err: raise IOError(err)
+  #       output += out + "\n"
 
-      f = open(postfixBCC, 'r')
-      out = f.read().split('\n')
-      f.close()
-      oldFile = set([])
-      for line in out:
-        if line and not line[0] in ["#",";"]:
-          oldFile.add(line.split()[0].lower())
-      newFile = set([ k for k in emails.keys() if (emails[k]['type'] == "User") and emails[k]['kopano'] and ( emails[k]['domino'] == emails[k]['forward'] ) ])
-      output += "Checking Postfix BCC entries\n"
-      if len(oldFile ^ newFile) or args['force']:
-        reloadPostfix = True
-        tmp = "Changes detected: Rebuilding Postfix BCC file for Mailmeter\n"
-        tmp += "Removed BCC emails:" + ", ".join(sorted(oldFile - newFile)) + "\n"
-        tmp += "Added BCC emails:" + ", ".join(sorted(newFile - oldFile)) + "\n"
-        output += brandt.syslog(tmp, options=['pid'])
+  #     reloadPostfix = False
 
-        tmp = "# /etc/postfix/bcc - OPW Postfix BCC Mapping for Kopano Only users\n"
-        for mail in sorted(newFile):
-          tmp += mail + "\tarchive@mailmeter.opw.ie\n"
-        f = open(postfixBCC, 'w')
-        f.write(tmp)
-        f.close()
+  #     f = open(postfixBCC, 'r')
+  #     out = f.read().split('\n')
+  #     f.close()
+  #     oldFile = set([])
+  #     for line in out:
+  #       if line and not line[0] in ["#",";"]:
+  #         oldFile.add(line.split()[0].lower())
+  #     newFile = set([ k for k in emails.keys() if (emails[k]['type'] == "User") and emails[k]['kopano'] and ( emails[k]['domino'] == emails[k]['forward'] ) ])
+  #     output += "Checking Postfix BCC entries\n"
+  #     if len(oldFile ^ newFile) or args['force']:
+  #       reloadPostfix = True
+  #       tmp = "Changes detected: Rebuilding Postfix BCC file for Mailmeter\n"
+  #       tmp += "Removed BCC emails:" + ", ".join(sorted(oldFile - newFile)) + "\n"
+  #       tmp += "Added BCC emails:" + ", ".join(sorted(newFile - oldFile)) + "\n"
+  #       output += brandt.syslog(tmp, options=['pid'])
 
-      f = open(postfixVTrans, 'r')
-      out = f.read().split('\n')
-      f.close()
-      oldFile = {}
-      for line in out:
-        if line and not line[0] in ["#",";"]:
-          tmp = str(line).lower().split()
-          oldFile[tmp[0]] = sorted([ x.strip() for x in tmp[1:] if x.strip() ])
-      newFile = {}
-      for mail in sorted(emails.keys()):
-        if emails[mail]['domino'] and not emails[mail]['forward']:
-          newFile[mail] = [ re.sub('@opw.ie$','@dublinnotes.opw.ie',mail) ]
-          if emails[mail]['kopano']: newFile[mail].append(mail)
-          newFile[mail] = sorted(newFile[mail])
-      output += "Checking Postfix vTransport entries\n"
-      same = bool( set(oldFile.keys()) == set(newFile.keys()) )
-      if same:
-        for mail in oldFile.keys():
-          same = bool( oldFile[mail] == newFile[mail] )
-          if not same: break
-      if not same or args['force']:
-        reloadPostfix = True
-        tmp = "Changes detected: Rebuilding Postfix vTransport file for Smarthost\n"
-        tmp += "Removed vTransport emails:" + ", ".join(sorted(set(oldFile.keys()) - set(newFile.keys()))) + "\n"
-        tmp += "Added vTransport emails:" + ", ".join(sorted(set(newFile.keys()) - set(oldFile.keys()))) + "\n"
-        output += brandt.syslog(tmp, options=['pid'])
+  #       tmp = "# /etc/postfix/bcc - OPW Postfix BCC Mapping for Kopano Only users\n"
+  #       for mail in sorted(newFile):
+  #         tmp += mail + "\tarchive@mailmeter.opw.ie\n"
+  #       f = open(postfixBCC, 'w')
+  #       f.write(tmp)
+  #       f.close()
 
-        tmp = "# /etc/postfix/vtransport - OPW Postfix virtual transport for Lotus Notes\n"
-        tmp += "# this file configures virtual transport for Lotus Notes only accounts (users & groups accounts)\n"
-        tmp += "# and for Kopano & Lotus notes accounts (users & groups accounts, no aliases exist)\n"
-        for mail in sorted(newFile.keys()):
-          tmp += mail + "\t" + "\t".join(newFile[mail]) + "\n"
-        f = open(postfixVTrans, 'w')
-        f.write(tmp)
-        f.close()
+  #     f = open(postfixVTrans, 'r')
+  #     out = f.read().split('\n')
+  #     f.close()
+  #     oldFile = {}
+  #     for line in out:
+  #       if line and not line[0] in ["#",";"]:
+  #         tmp = str(line).lower().split()
+  #         oldFile[tmp[0]] = sorted([ x.strip() for x in tmp[1:] if x.strip() ])
+  #     newFile = {}
+  #     for mail in sorted(emails.keys()):
+  #       if emails[mail]['domino'] and not emails[mail]['forward']:
+  #         newFile[mail] = [ re.sub('@opw.ie$','@dublinnotes.opw.ie',mail) ]
+  #         if emails[mail]['kopano']: newFile[mail].append(mail)
+  #         newFile[mail] = sorted(newFile[mail])
+  #     output += "Checking Postfix vTransport entries\n"
+  #     same = bool( set(oldFile.keys()) == set(newFile.keys()) )
+  #     if same:
+  #       for mail in oldFile.keys():
+  #         same = bool( oldFile[mail] == newFile[mail] )
+  #         if not same: break
+  #     if not same or args['force']:
+  #       reloadPostfix = True
+  #       tmp = "Changes detected: Rebuilding Postfix vTransport file for Smarthost\n"
+  #       tmp += "Removed vTransport emails:" + ", ".join(sorted(set(oldFile.keys()) - set(newFile.keys()))) + "\n"
+  #       tmp += "Added vTransport emails:" + ", ".join(sorted(set(newFile.keys()) - set(oldFile.keys()))) + "\n"
+  #       output += brandt.syslog(tmp, options=['pid'])
 
-      if reloadPostfix or args['force']:
-        output += brandt.syslog("Rebuilding Postmaps\n", options=['pid'])
-        command = '/usr/sbin/postmap ' + postfixBCC 
-        p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate()
-        if err: raise IOError(err)
-        output += out + "\n"
+  #       tmp = "# /etc/postfix/vtransport - OPW Postfix virtual transport for Lotus Notes\n"
+  #       tmp += "# this file configures virtual transport for Lotus Notes only accounts (users & groups accounts)\n"
+  #       tmp += "# and for Kopano & Lotus notes accounts (users & groups accounts, no aliases exist)\n"
+  #       for mail in sorted(newFile.keys()):
+  #         tmp += mail + "\t" + "\t".join(newFile[mail]) + "\n"
+  #       f = open(postfixVTrans, 'w')
+  #       f.write(tmp)
+  #       f.close()
 
-        command = '/usr/sbin/postmap ' + postfixVTrans 
-        p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate()
-        if err: raise IOError(err)
-        output += out + "\n"
+  #     if reloadPostfix or args['force']:
+  #       output += brandt.syslog("Rebuilding Postmaps\n", options=['pid'])
+  #       command = '/usr/sbin/postmap ' + postfixBCC 
+  #       p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  #       out, err = p.communicate()
+  #       if err: raise IOError(err)
+  #       output += out + "\n"
 
-        output += brandt.syslog("Reloading Postfix\n", options=['pid'])
-        command = 'service postfix reload'
-        p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate()
-        if err: raise IOError(err)
-        output += out + "\n"
+  #       command = '/usr/sbin/postmap ' + postfixVTrans 
+  #       p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  #       out, err = p.communicate()
+  #       if err: raise IOError(err)
+  #       output += out + "\n"
 
-  except SystemExit as err:
-    pass
-  except Exception as err:
-    try:
-      exitcode = int(err[0])
-      errmsg = str(" ".join(err[1:]))
-    except:
-      exitcode = -1
-      errmsg = str(err)
+  #       output += brandt.syslog("Reloading Postfix\n", options=['pid'])
+  #       command = 'service postfix reload'
+  #       p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  #       out, err = p.communicate()
+  #       if err: raise IOError(err)
+  #       output += out + "\n"
 
-    if args['web']: 
-      error = "(" + str(exitcode) + ") " + str(errmsg) + "\nCommand: " + " ".join(sys.argv)
-    else:
-      xmldata = ElementTree.Element('error', code=brandt.strXML(exitcode), 
-                                             msg=brandt.strXML(errmsg), 
-                                             cmd=brandt.strXML(" ".join(sys.argv)))
-  finally:
-    if not args['web']: 
-      if output: print str(output)
-      if error:  sys.stderr.write( str(error) + "\n" )
-    else:    
-      xml = ElementTree.Element('kopanoadmin')
-      xml.append(xmldata)
-      print '<?xml version="1.0" encoding="' + encoding + '"?>\n' + ElementTree.tostring(xml, encoding=encoding, method="xml")
-    sys.exit(exitcode)
+  # except SystemExit as err:
+  #   pass
+  # except Exception as err:
+  #   try:
+  #     exitcode = int(err[0])
+  #     errmsg = str(" ".join(err[1:]))
+  #   except:
+  #     exitcode = -1
+  #     errmsg = str(err)
+
+  #   if args['web']: 
+  #     error = "(" + str(exitcode) + ") " + str(errmsg) + "\nCommand: " + " ".join(sys.argv)
+  #   else:
+  #     xmldata = ElementTree.Element('error', code=brandt.strXML(exitcode), 
+  #                                            msg=brandt.strXML(errmsg), 
+  #                                            cmd=brandt.strXML(" ".join(sys.argv)))
+  # finally:
+  #   if not args['web']: 
+  #     if output: print str(output)
+  #     if error:  sys.stderr.write( str(error) + "\n" )
+  #   else:    
+  #     xml = ElementTree.Element('kopanoadmin')
+  #     xml.append(xmldata)
+  #     print '<?xml version="1.0" encoding="' + encoding + '"?>\n' + ElementTree.tostring(xml, encoding=encoding, method="xml")
+  #   sys.exit(exitcode)
 
