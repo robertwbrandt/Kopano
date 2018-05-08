@@ -15,24 +15,41 @@ sys.path.pop()
 args = {}
 args['config'] = '/etc/kopano/server.cfg'
 args['force'] = False
-args['web'] = False
 args['minObjects'] = 800
 
 version = 0.4
-encoding = 'utf-8'
 
-kopanoLDAP       = {}
-kopanoFilter     = ""
-kopanoLDAPURL    = ""
-kopanoAttrAdd    = set(["objectclass","samaccountname"])
-kopanoAttrIgnore = set(["usnchanged","objectguid","grouptype","unicodepwd","usercertificate","usercertificate;binary","zarafabase"])
-kopanoCacheFile  = "/tmp/kopano.ldap.cache"
+ADLDAP            = {}
+ADLDAPURL         = ""
+ADLDAPAttrAdd     = set(["objectclass","samaccountname","msExchGenericForwardingAddress","msExchHomeServerName"])
+ADLDAPAttrIgnore  = set(["usnchanged","objectguid","grouptype","unicodepwd","usercertificate","usercertificate;binary","zarafabase"])
+cacheFile         = "/tmp/kopano.ldap.cache"
+postfixVTransport = "/etc/postfix/vtransport"
 
-exchangeAttrs    = set(["msExchGenericForwardingAddress","msExchHomeServerName"])
+postfixVTransportHeader = """
+# /etc/postfix/vtransport - Postfix virtual transport for Exchange
+# this file configures virtual transport for Exchange only accounts (users & groups accounts)
+# and for Kopano & Exchange accounts (users & groups accounts, no aliases exist)
+administrators@opw.ie administrators@dublinnotes.opw.ie
+notes.administrator@opw.ie  notes.administrator@dublinnotes.opw.ie
+oireachtas.oireachtas@opw.ie  oireachtas.oireachtas@dublinnotes.opw.ie
+#chaircorr@opw.ie chaircorr@dublinnotes.opw.ie
+#eftpay@opw.ie  eftpay@dublinnotes.opw.ie
+#enghatchst@opw.ie  enghatchst@dublinnotes.opw.ie
+#investigate@opw.ie investigate@dublinnotes.opw.ie
+#mailmeter@opw.ie mailmeter@dublinnotes.opw.ie
+#mailsweeper@opw.ie mailsweeper@dublinnotes.opw.ie
+#mcmahondiary@opw.ie  mcmahondiary@dublinnotes.opw.ie
+#opwpeople@opw.ie opwpeople@dublinnotes.opw.ie
+#opwstaff@opw.ie  opwstaff@dublinnotes.opw.ie
+#postmaster@opw.ie  postmaster@dublinnotes.opw.ie
+#btu@opw.ie btu@dublinnotes.opw.ie  btu@opw.ie
+"""
 
-emailCacheFile   = "/tmp/email.ldap.cache"
+exchangeLDAPFilter = "(&(msExchHomeServerName=*)(mail=*))"
 
-postfixVTrans = "/etc/postfix/vtransport"
+
+
 
 class customUsageVersion(argparse.Action):
   def __init__(self, option_strings, dest, **kwargs):
@@ -67,7 +84,6 @@ class customUsageVersion(argparse.Action):
       options.append(("-v, --version",       "Show program's version number and exit"))
       options.append(("-c, --config CONFIG", "Kopano Configuration file (Default: " + args['config'] + ")"))
       options.append(("-f, --force",         "Force sync"))
-      options.append(("-w, --web",           "Web XML only"))
       length = max( [ len(option[0]) for option in options ] )
       for option in options:
         description = textwrap.wrap(option[1], (self.__row - length - 5))
@@ -89,20 +105,15 @@ def command_line_args():
                       default=args['force'],
                       action="store_true",
                       help="Force sync")
-  parser.add_argument('-w', '--web',
-                      required=False,
-                      default=args['web'],
-                      action="store_true",
-                      help="Web XML only")  
   args.update(vars(parser.parse_args()))
 
 
 def get_kopano_LDAPURI():
-  global args, kopanoAttrIgnore
+  global args, ADLDAP, ADLDAPAttrAdd, ADLDAPAttrIgnore, exchangeLDAPFilter
   ldapConfig  = ""
   ldapPropMap = ""
-  kopanoAttrs = set(["objectclass"])
-  kopanoFilter = ""
+  kopanoAttrs = ADLDAPAttrAdd
+  LDAPFilter  = exchangeLDAPFilter
 
   f = open(args['config'], 'r')
   out = f.read()
@@ -125,7 +136,7 @@ def get_kopano_LDAPURI():
     if line and str(line)[0] not in ['#',';']:
       line = line.split("=",1)
       if len(line) == 2 and line[1].strip(): 
-        kopanoLDAP[str(line[0]).strip().lower()] = str(line[1]).strip()
+        ADLDAP[str(line[0]).strip().lower()] = str(line[1]).strip()
 
   f = open(ldapPropMap, 'r')
   out = f.read()
@@ -136,33 +147,28 @@ def get_kopano_LDAPURI():
       if len(line) == 2 and line[1].strip(): 
         kopanoAttrs.add(str(line[1]).strip().lower())
 
-  for key in kopanoLDAP.keys():
+  for key in ADLDAP.keys():
     if key[-9:] == 'attribute':
-      kopanoAttrs.add(kopanoLDAP[key].lower())
-  kopanoAttrs -= kopanoAttrIgnore
-  kopanoAttrs |= exchangeAttrs
+      kopanoAttrs.add(ADLDAP[key].lower())
+  kopanoAttrs -= ADLDAPAttrIgnore
 
-  for key in kopanoLDAP.keys():
+  for key in ADLDAP.keys():
     if key[-6:] == 'filter':
-      kopanoFilter += kopanoLDAP[key]
-  kopanoFilter = "(|" + kopanoFilter +")"
+      LDAPFilter += ADLDAP[key]
+  LDAPFilter = "(|" + LDAPFilter +")"
 
+  ADLDAPURI = ADLDAP.get('ldap_uri','').split(" ")[0]
+  if not ADLDAPURI:
+    ADLDAPURI = ADLDAP.get('ldap_protocol','ldap') + '://' + ADLDAP.get('ldap_host','')
+    if ADLDAP.has_key('ldap_port'): ADLDAPURI += ':' + ADLDAP['ldap_port']
+  if ADLDAPURI[-1] != "/": ADLDAPURI += '/'
+  if ADLDAP.has_key('ldap_search_base'): ADLDAPURI += urllib.quote(ADLDAP['ldap_search_base'])
+  ADLDAPURI += "?" + urllib.quote(",".join(sorted(kopanoAttrs)))
+  ADLDAPURI += "?sub"
+  ADLDAPURI += "?" + LDAPFilter
+  if ADLDAP.has_key('ldap_bind_user'): ADLDAPURI += "?bindname=" + urllib.quote(ADLDAP['ldap_bind_user']) + ",X-BINDPW=" + urllib.quote(ADLDAP.get('ldap_bind_passwd',""))
 
-  print "kopanoAttrs",kopanoAttrs
-
-
-  kopanoLDAPURI = kopanoLDAP.get('ldap_uri','').split(" ")[0]
-  if not kopanoLDAPURI:
-    kopanoLDAPURI = kopanoLDAP.get('ldap_protocol','ldap') + '://' + kopanoLDAP.get('ldap_host','')
-    if kopanoLDAP.has_key('ldap_port'): kopanoLDAPURI += ':' + kopanoLDAP['ldap_port']
-  if kopanoLDAPURI[-1] != "/": kopanoLDAPURI += '/'
-  if kopanoLDAP.has_key('ldap_search_base'): kopanoLDAPURI += urllib.quote(kopanoLDAP['ldap_search_base'])
-  kopanoLDAPURI += "?" + urllib.quote(",".join(sorted(kopanoAttrs)))
-  kopanoLDAPURI += "?sub"
-  kopanoLDAPURI += "?" + kopanoFilter
-  if kopanoLDAP.has_key('ldap_bind_user'): kopanoLDAPURI += "?bindname=" + urllib.quote(kopanoLDAP['ldap_bind_user']) + ",X-BINDPW=" + urllib.quote(kopanoLDAP.get('ldap_bind_passwd',""))
-
-  return kopanoLDAPURI
+  return ADLDAPURI
 
 def get_ldap(LDAPURI):
   # try:
@@ -211,52 +217,58 @@ def cmpDict(dict1, dict2):
     return False
   return True
 
-def get_data():
+def ordered(obj):
+  if isinstance(obj, dict):
+    return sorted((k, ordered(v)) for k, v in obj.items())
+  if isinstance(obj, list):
+    return sorted(ordered(x) for x in obj)
+  else:
+    return obj
+
+def get_data(LDAPURI):
   global args, output
 
-  kopanoChanged = False
-  combinedEmails = read_cache_file(emailCacheFile)
+  date = datetime.datetime.now()
+  liveData = get_ldap(LDAPURI)
+
+  if len(liveData) < args['minObjects']:
+    tmp = "Unable to get reliable Active Directory Download. Only " + str(len(liveData)) + " objects."
+    tmp += '\n' + str(LDAPURI)
+    raise IOError, tmp
+
+  changed = True
+  cachedData = read_cache_file(cacheFile)
   date = None
-  if combinedEmails: date = datetime.datetime.fromtimestamp(os.stat(emailCacheFile).st_mtime)
+  if cachedData:
+    date = datetime.datetime.fromtimestamp(os.stat(cacheFile).st_mtime)
+    changed = not ( ordered( cachedData ) == ordered( liveData ) )
+  if changed: write_cache_file(cacheFile,liveData)
 
-  if not combinedEmails or not args['web']:
-    date = datetime.datetime.now()
-    URI = get_kopano_LDAPURI()
+  # if not cachedData or not args['web']:
+  #   kopanoCache = read_cache_file(cacheFile)
+  #   output += "Checking Kopano entries\n"
+  #   if not cmpDict(kopanoLive, kopanoCache):
+  #     output += "Kopano entries have changed\n"
+  #     write_cache_file(cacheFile,kopanoLive)
+  #     kopanoChanged = True
+  #   cachedData = {}
+  #   for account in kopanoLive.keys():
+  #     for mail in kopanoLive[account].get('mail',[]) + kopanoLive[account].get('othermailbox',[]):
+  #       objectclass = set([ str(x).lower() for x in kopanoLive[account].get('objectclass',[]) ])
+  #       cachedData[mail] = {'kopano':True, 
+  #                               'domino':False, 
+  #                               'forward':False, 
+  #                               'type':'', 
+  #                               'username':str(kopanoLive[account].get('samaccountname',[''])[0])}
+  #       if bool(set(["group","dominogroup","groupofnames"]) & objectclass):
+  #         cachedData[mail]['type'] = "Group"
+  #       elif bool(set(["person","user","dominoperson","inetorgperson","organizationalperson"]) & objectclass):
+  #         cachedData[mail]['type'] = "User"
+  #       else:
+  #         cachedData[mail]['type'] = ",".join(sorted(objectclass))
+  #   write_cache_file(cacheFile,cachedData)
 
-    kopanoLive = get_ldap(kopanoURI)
-    if len(kopanoLive) < args['minObjects']:
-      tmp = "Unable to get reliable Kopano Download. Only " + str(len(kopanoLive)) + " objects."
-      tmp += '\n' + str(kopanoURI)
-      raise IOError, tmp
-    kopanoCache = read_cache_file(kopanoCacheFile)
-    output += "Checking Kopano entries\n"
-    if not cmpDict(kopanoLive, kopanoCache):
-      output += "Kopano entries have changed\n"
-      write_cache_file(kopanoCacheFile,kopanoLive)
-      kopanoChanged = True
-
-    combinedEmails = {}
-    for account in kopanoLive.keys():
-      for mail in kopanoLive[account].get('mail',[]) + kopanoLive[account].get('othermailbox',[]):
-        objectclass = set([ str(x).lower() for x in kopanoLive[account].get('objectclass',[]) ])
-        combinedEmails[mail] = {'kopano':True, 
-                                'domino':False, 
-                                'forward':False, 
-                                'type':'', 
-                                'username':str(kopanoLive[account].get('samaccountname',[''])[0])}
-        if bool(set(["group","dominogroup","groupofnames"]) & objectclass):
-          combinedEmails[mail]['type'] = "Group"
-        elif bool(set(["person","user","dominoperson","inetorgperson","organizationalperson"]) & objectclass):
-          combinedEmails[mail]['type'] = "User"
-        else:
-          combinedEmails[mail]['type'] = ",".join(sorted(objectclass))
-
-
-    print "kopanoURI",kopanoURI
-
-    write_cache_file(emailCacheFile,combinedEmails)
-
-  return (kopanoChanged, date, combinedEmails)
+  return (changed, date, liveData)
 
 # Start program
 if __name__ == "__main__":
@@ -264,10 +276,44 @@ if __name__ == "__main__":
     output = ""
     error = ""
     exitcode = 0    
-    xmldata = None
 
     command_line_args()
-    kopanoChanged, date, emails = get_data()
+    changed, date, data = get_data( get_kopano_LDAPURI() )
+
+    if changed or args['force']:
+      print "Run Kopano Sync"
+      # output += brandt.syslog("Changes detected: Running Kopano Sync\n", options=['pid'])
+      # command = '/usr/sbin/kopano-admin --sync'
+      # p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+      # out, err = p.communicate()
+      # if err: raise IOError(err)
+      # output += out + "\n"
+
+
+
+      vTransport = str(postfixVTransportHeader).strip()
+      vTransportUsers=[]
+      # Find Exchnage user who do NOT have forwarding turned on.
+      for user in data:
+        if data[user].has_key("msexchhomeservername"):
+          if not data[user].has_key("msexchgenericforwardingaddress"):
+            if data[user].has_key("mail"):
+              vTransportUsers += data[user]["mail"]
+
+      for user in sorted(vTransportUsers):
+        exchange = str(user).lower().replace("@opw.ie","@exchange.opw.ie")
+        if str(user).lower() != exchange:
+          vTransport += "\n" + user + "\t" + exchange
+
+      f = open(postfixVTransport, 'r')
+      out = f.read()
+      f.close()
+      changed = ( out != vTransport )
+
+      if changed or args['force']: 
+        print "Reload Postfix"
+
+
 
 
   #   if args['web']:
@@ -313,7 +359,7 @@ if __name__ == "__main__":
   #       f.write(tmp)
   #       f.close()
 
-  #     f = open(postfixVTrans, 'r')
+  #     f = open(postfixVTransport, 'r')
   #     out = f.read().split('\n')
   #     f.close()
   #     oldFile = {}
@@ -345,7 +391,7 @@ if __name__ == "__main__":
   #       tmp += "# and for Kopano & Lotus notes accounts (users & groups accounts, no aliases exist)\n"
   #       for mail in sorted(newFile.keys()):
   #         tmp += mail + "\t" + "\t".join(newFile[mail]) + "\n"
-  #       f = open(postfixVTrans, 'w')
+  #       f = open(postfixVTransport, 'w')
   #       f.write(tmp)
   #       f.close()
 
@@ -357,7 +403,7 @@ if __name__ == "__main__":
   #       if err: raise IOError(err)
   #       output += out + "\n"
 
-  #       command = '/usr/sbin/postmap ' + postfixVTrans 
+  #       command = '/usr/sbin/postmap ' + postfixVTransport 
   #       p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
   #       out, err = p.communicate()
   #       if err: raise IOError(err)
