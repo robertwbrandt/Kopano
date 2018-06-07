@@ -187,36 +187,6 @@ def read_cache_file(filename):
 def write_cache_file(filename, data):
   json.dump(data, open(filename, 'w'), sort_keys=True, indent=2)
 
-def cmpDict(dict1, dict2):
-  global args,output
-
-  try:  
-    if set(dict1.keys()) != set(dict2.keys()): 
-      output += "Changes Found:\n"
-      if bool(set(dict1.keys()) - set(dict2.keys())):
-        output += "New DNs: " + ", ".join(list(set(dict1.keys()))) + "\n"
-      if bool(set(dict2.keys()) - set(dict1.keys())):
-        output += "Removed DNs: " + ", ".join(list(set(dict2.keys()))) + "\n"
-      return False
-    for dn in dict1.keys():
-      if sorted(dict1[dn].keys()) != sorted(dict2[dn].keys()):
-        output += "Changes Found:\n"
-        if bool(set(dict1[dn].keys()) - set(dict2[dn].keys())):
-          output += "New Attribute for (" + str(dn) + "): " + ", ".join(list(set(dict1[dn].keys()))) + "\n"
-        if bool(set(dict2[dn].keys()) - set(dict1[dn].keys())):
-          output += "Removed Attribute for (" + str(dn) + "): " + ", ".join(list(set(dict2[dn].keys()))) + "\n"
-        return False
-      for attr in dict1[dn].keys():
-        if sorted(dict1[dn][attr]) != sorted(dict2[dn][attr]):
-          output += "Changes Found:\n"
-          output += "Value of Attribute(" + str(attr) + ") for (" + str(dn) + "):\n"
-          output += "Old: " + ", ".join(sorted(dict2[dn][attr])) + "\n"
-          output += "New: " + ", ".join(sorted(dict1[dn][attr])) + "\n"
-          return False
-  except:
-    return False
-  return True
-
 def ordered(obj):
   if isinstance(obj, dict):
     return sorted((k, ordered(v)) for k, v in obj.items())
@@ -242,7 +212,7 @@ def get_data(LDAPURI):
   if cachedData:
     date = datetime.datetime.fromtimestamp(os.stat(cacheFile).st_mtime)
     changed = not ( ordered( cachedData ) == ordered( liveData ) )
-  if changed: write_cache_file(cacheFile,liveData)
+  if changed: write_cache_file(cacheFile, ordered(liveData))
 
   return (changed, date, liveData)
 
@@ -277,6 +247,7 @@ if __name__ == "__main__":
               vTransportUsers += data[user]["mail"]
 
       for user in sorted(vTransportUsers):
+        print user
         exchange = str(user).lower().replace("@opw.ie","@exchange.opw.ie")
         if str(user).lower() != exchange:
           vTransport += "\n" + user + "\t" + exchange
