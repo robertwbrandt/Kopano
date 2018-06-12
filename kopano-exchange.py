@@ -15,13 +15,14 @@ sys.path.pop()
 args = {}
 args['config'] = '/etc/kopano/server.cfg'
 args['force'] = False
+args['dry_run'] = False
 args['minObjects'] = 800
 
 version = 0.4
 
 ADLDAP            = {}
 ADLDAPURL         = ""
-ADLDAPAttrAdd     = set(["objectclass","samaccountname","msExchGenericForwardingAddress","msExchHomeServerName"])
+ADLDAPAttrAdd     = set(["objectclass","samaccountname","msExchGenericForwardingAddress","msExchHomeServerName","msExchmailboxguid"])
 ADLDAPAttrIgnore  = set(["usnchanged","objectguid","grouptype","unicodepwd","usercertificate","usercertificate;binary","zarafabase"])
 cacheFile         = "/tmp/kopano.ldap.cache"
 postfixVTransport = "/etc/postfix/vtransport"
@@ -48,9 +49,6 @@ oireachtas.oireachtas@opw.ie  oireachtas.oireachtas@dublinnotes.opw.ie
 
 exchangeLDAPFilter = "(&(msExchHomeServerName=*)(mail=*))"
 
-
-
-
 class customUsageVersion(argparse.Action):
   def __init__(self, option_strings, dest, **kwargs):
     self.__version = str(kwargs.get('version', ''))
@@ -59,7 +57,7 @@ class customUsageVersion(argparse.Action):
     self.__exit = int(kwargs.get('exit', 0))
     super(customUsageVersion, self).__init__(option_strings, dest, nargs=0)
   def __call__(self, parser, namespace, values, option_string=None):
-    # print('%r %r %r' % (namespace, values, option_string))
+    global args
     if self.__version:
       print self.__prog + " " + self.__version
       print "Copyright (C) 2013 Free Software Foundation, Inc."
@@ -84,11 +82,12 @@ class customUsageVersion(argparse.Action):
       options.append(("-v, --version",       "Show program's version number and exit"))
       options.append(("-c, --config CONFIG", "Kopano Configuration file (Default: " + args['config'] + ")"))
       options.append(("-f, --force",         "Force sync"))
+      options.append(("-d, --dry_run",       "Dry Run - Do nothing"))
       length = max( [ len(option[0]) for option in options ] )
       for option in options:
         description = textwrap.wrap(option[1], (self.__row - length - 5))
         print "  " + option[0].ljust(length) + "   " + description[0]
-      for n in range(1,len(description)): print " " * (length + 5) + description[n]
+        for n in range(1,len(description)): print " " * (length + 5) + description[n]
     exit(self.__exit)
 def command_line_args():
   global args, version
@@ -105,6 +104,11 @@ def command_line_args():
                       default=args['force'],
                       action="store_true",
                       help="Force sync")
+  parser.add_argument('-d', '--dry_run',
+                      required=False,
+                      default=args['dry_run'],
+                      action="store_true",
+                      help="Dry Run - Do nothing")  
   args.update(vars(parser.parse_args()))
 
 
@@ -218,36 +222,37 @@ def get_data(LDAPURI):
 
 # Start program
 if __name__ == "__main__":
-  # try:
+  try:
     output = ""
     error = ""
     exitcode = 0    
 
     command_line_args()
+
     changed, date, data = get_data( get_kopano_LDAPURI() )
 
     if changed or args['force']:
-      print "Run Kopano Sync"
-      # output += brandt.syslog("Changes detected: Running Kopano Sync\n", options=['pid'])
-      # command = '/usr/sbin/kopano-admin --sync'
-      # p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-      # out, err = p.communicate()
-      # if err: raise IOError(err)
-      # output += out + "\n"
+      if args['dry_run']:
+        print "Run Kopano Sync"
+      else:
+        output += brandt.syslog("Changes detected: Running Kopano Sync\n", options=['pid'])
+        command = '/usr/sbin/kopano-admin --sync'
+        p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = p.communicate()
+        if err: raise IOError(err)
+        output += out + "\n"
 
-
-
+      # Find Exchnage user who do NOT have forwarding turned on.
       vTransport = str(postfixVTransportHeader).strip()
       vTransportUsers=[]
-      # Find Exchnage user who do NOT have forwarding turned on.
       for user in data:
-        if data[user].has_key("msexchhomeservername"):
+        # if data[user].has_key("msexchhomeservername"):
+        if data[user].has_key("msexchmailboxguid"):
           if not data[user].has_key("msexchgenericforwardingaddress"):
             if data[user].has_key("mail"):
               vTransportUsers += data[user]["mail"]
 
       for user in sorted(vTransportUsers):
-        print user
         exchange = str(user).lower().replace("@opw.ie","@exchange.opw.ie")
         if str(user).lower() != exchange:
           vTransport += "\n" + user + "\t" + exchange
@@ -257,43 +262,46 @@ if __name__ == "__main__":
       f.close()
       changed = ( out != vTransport )
 
-      if changed or args['force']: 
-        print "Reload Postfix"
-        # output += brandt.syslog("Rebuilding Postmaps\n", options=['pid'])
-        # command = '/usr/sbin/postmap ' + postfixBCC 
-        # p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # out, err = p.communicate()
-        # if err: raise IOError(err)
-        # output += out + "\n"
+      if changed or args['force']:
+        if args['dry_run']:
+          print "\nvTransport file:"
+          print vTransport
+        else:
+          f = open(postfixVTransport, 'w')
+          f.write(vTransport)
+          f.close()
 
-        # command = '/usr/sbin/postmap ' + postfixVTransport 
-        # p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # out, err = p.communicate()
-        # if err: raise IOError(err)
-        # output += out + "\n"
+        if args['dry_run']:
+          print "\nRecompile Postmap for vTransport..."
+        else:
+          command = '/usr/sbin/postmap ' + postfixVTransport 
+          p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+          out, err = p.communicate()
+          if err: raise IOError(err)
+          output += out + "\n"
 
-        # output += brandt.syslog("Reloading Postfix\n", options=['pid'])
-        # command = 'service postfix reload'
-        # p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # out, err = p.communicate()
-        # if err: raise IOError(err)
-        # output += out + "\n"
+        if args['dry_run']:
+          print "Reloading Postfix..."
+        else:
+          output += brandt.syslog("Reloading Postfix\n", options=['pid'])
+          command = 'service postfix reload'
+          p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+          out, err = p.communicate()
+          if err: raise IOError(err)
+          output += out + "\n"
 
-
-
-
-  # except SystemExit as err:
-  #   pass
-  # except Exception as err:
-  #   try:
-  #     exitcode = int(err[0])
-  #     errmsg = str(" ".join(err[1:]))
-  #   except:
-  #     exitcode = -1
-  #     errmsg = str(err)
-  #   error = "(" + str(exitcode) + ") " + str(errmsg) + "\nCommand: " + " ".join(sys.argv)
-  # finally:
-  #   if output: print str(output)
-  #   if error:  sys.stderr.write( str(error) + "\n" )
-  #   sys.exit(exitcode)
+  except SystemExit as err:
+    pass
+  except Exception as err:
+    try:
+      exitcode = int(err[0])
+      errmsg = str(" ".join(err[1:]))
+    except:
+      exitcode = -1
+      errmsg = str(err)
+    error = "(" + str(exitcode) + ") " + str(errmsg) + "\nCommand: " + " ".join(sys.argv)
+  finally:
+    if output: print str(output)
+    if error:  sys.stderr.write( str(error) + "\n" )
+    sys.exit(exitcode)
 
